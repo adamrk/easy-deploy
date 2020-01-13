@@ -9,6 +9,10 @@ fn main() {
         .help("target deploy location")
         .required(true);
 
+    let message_arg = Arg::with_name("MESSAGE")
+        .help("deploy comment")
+        .required(false);
+
     let matches = App::new("RSink")
         .about("simple deploy")
         .subcommand(
@@ -20,7 +24,8 @@ fn main() {
                         .required(true)
                         .index(1),
                 )
-                .arg(target_arg.clone().index(2)),
+                .arg(target_arg.clone().index(2))
+                .arg(message_arg.clone().index(3)),
         )
         .subcommand(
             SubCommand::with_name("list")
@@ -32,6 +37,7 @@ fn main() {
         easy_deploy::deploy(
             &PathBuf::from(matches.value_of("SOURCE").unwrap()),
             PathBuf::from(matches.value_of("TARGET").unwrap()),
+            String::from(matches.value_of("MESSAGE").unwrap_or(""))
         )
     } else if let Some(matches) = matches.subcommand_matches("list") {
         easy_deploy::list(PathBuf::from(matches.value_of("TARGET").unwrap()))

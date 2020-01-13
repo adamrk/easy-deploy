@@ -1,4 +1,5 @@
 use chrono::prelude::*;
+#[cfg(test)]
 use chrono::Duration;
 
 pub trait WallClock {
@@ -14,27 +15,29 @@ impl WallClock for SystemTime {
     }
 }
 
-pub static SYSTEM_TIME : SystemTime = SystemTime(()); 
+pub static SYSTEM_TIME: SystemTime = SystemTime(());
 
 #[cfg(test)]
 pub struct FakeTime {
-    now: DateTime<Utc>
+    current: DateTime<Utc>,
 }
 
 #[cfg(test)]
 impl WallClock for FakeTime {
     fn now(&self) -> DateTime<Utc> {
-        self.now
+        self.current
     }
 }
 
 #[cfg(test)]
 impl FakeTime {
-    pub fn new(now: DateTime<Utc>) -> Self {
-        FakeTime { now }
+    pub fn new(current: DateTime<Utc>) -> Self {
+        FakeTime { current }
     }
 
     pub fn advance(self, dur: Duration) -> Self {
-        FakeTime { now: self.now + dur }
+        FakeTime {
+            current: self.current + dur,
+        }
     }
 }
