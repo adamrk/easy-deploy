@@ -155,7 +155,7 @@ impl TargetState {
 
 fn modify_filename(path: &PathBuf, f: impl Fn(&OsStr) -> OsString) -> PathBuf {
     let name = path.file_name().expect("invalid path, can't get file name");
-    return path.with_file_name(f(name));
+    path.with_file_name(f(name))
 }
 
 fn add_to_os_string(s: &str, os_string: &OsStr) -> OsString {
@@ -187,7 +187,7 @@ fn deploy_with_state(
         let _ = remove_file(&state.target)?;
     }
     let _ = symlink(hidden_path, &state.target)?;
-    return Ok(state.add_deployment(next_id, now, message));
+    Ok(state.add_deployment(next_id, now, message))
 }
 
 fn deploy_internal(
@@ -223,15 +223,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        deploy_internal, 
-        deploy_with_state, 
-        get_state_path,
-        wall_clock::{FakeTime, WallClock}, 
-        DeployedBinV1,
-        DeployedBinV2, 
-        TargetStateV1, 
-        TargetState,
-        VersionedTargetState};
+        deploy_internal, deploy_with_state, get_state_path,
+        wall_clock::{FakeTime, WallClock},
+        DeployedBinV1, DeployedBinV2, TargetState, TargetStateV1, VersionedTargetState,
+    };
 
     fn assert_contents_matches(file: &PathBuf, contents: &str) {
         let mut buf = String::new();
@@ -275,17 +270,17 @@ mod tests {
 
         assert_eq!(
             state.deployments,
-            hashmap![ 
-                0 => DeployedBinV2 { time, message: String::from(message) }, 
-                1 => DeployedBinV2 { time, message: String::from(message) }]
+            hashmap![
+                0 => DeployedBinV2 { time, message: String::from(message) },
+                1 => DeployedBinV2 { time, message: String::from(message) },
+            ]
         );
     }
 
     #[test]
     fn full_deploy_copies_contents() {
         let (to_deploy, target) = setup_test_temp_dir();
-        let clock =
-            FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
+        let clock = FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
 
         let text1: &str = "some contents";
         create_file(&to_deploy, text1);
@@ -322,8 +317,7 @@ mod tests {
     fn full_deploy_upgrades_state() {
         let (to_deploy, target) = setup_test_temp_dir();
 
-        let clock =
-            FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
+        let clock = FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
 
         let old_state = TargetStateV1 {
             deployments: hashmap! {
