@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 mod wall_clock;
 
 const STATE_FILE_PREFIX: &str = ".easy-deploy";
+const MAX_VERSIONS_TO_KEEP: usize = 10;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct DeployedBinV1 {
@@ -59,6 +60,7 @@ impl TargetStateV1 {
     }
 }
 
+/// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct TargetStateV2 {
     deployments: HashMap<u128, DeployedBinV2>,
@@ -151,6 +153,26 @@ impl TargetState {
         });
         table.print(output)
     }
+
+    fn order_ids(&self) -> Vec<u128> {
+        let mut ids: Vec<u128> = self.deployments.keys().map(|x| *x).collect();
+        ids.sort_by(|x, y| y.cmp(x));
+        ids
+    }
+
+    fn garbage_collect(&mut self) -> Vec<u128> {
+        let ordered_ids = self.order_ids();
+        let to_drop: Vec<u128> = ordered_ids
+            .iter()
+            .skip(MAX_VERSIONS_TO_KEEP)
+            .map(|x| *x)
+            .collect();
+        let dropping: &Vec<u128> = to_drop.as_ref();
+        for id in dropping {
+            self.deployments.remove(&id);
+        }
+        to_drop
+    }
 }
 
 fn modify_filename(path: &PathBuf, f: impl Fn(&OsStr) -> OsString) -> PathBuf {
@@ -173,6 +195,17 @@ fn get_state_path(target: &PathBuf) -> PathBuf {
     modify_filename(target, |name| add_to_os_string(STATE_FILE_PREFIX, name))
 }
 
+fn delete_garbage(mut state: TargetState) -> Result<TargetState> {
+    let garbage = state.garbage_collect();
+    for id in garbage {
+        let path = get_hidden_target(&state.target, id);
+        if path.exists() {
+            let _ = remove_file(path)?;
+        }
+    }
+    Ok(state)
+}
+
 fn deploy_with_state(
     state: TargetState,
     exe: &PathBuf,
@@ -187,7 +220,8 @@ fn deploy_with_state(
         let _ = remove_file(&state.target)?;
     }
     let _ = symlink(hidden_path, &state.target)?;
-    Ok(state.add_deployment(next_id, now, message))
+    let state = state.add_deployment(next_id, now, message);
+    delete_garbage(state)
 }
 
 fn deploy_internal(
@@ -211,6 +245,21 @@ pub fn list(target: PathBuf) -> Result<()> {
     state.pretty_print(&mut std::io::stdout()).map(|_| ())
 }
 
+pub fn rollback_internal(
+    target: PathBuf,
+    clock: &impl wall_clock::WallClock,
+    message: String,
+) -> Result<()> {
+    let state = TargetState::load(target);
+    let ordered_ids = state.order_ids();
+    let prev_id = match ordered_ids.get(1) {
+        None => panic!("no previous deploy"),
+        Some(id) => id,
+    };
+    let to_deploy = get_hidden_target(&state.target, *prev_id);
+    deploy_internal(&to_deploy, state.target, clock, message)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::File;
@@ -223,9 +272,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        deploy_internal, deploy_with_state, get_state_path,
+        deploy_internal, deploy_with_state, get_state_path, rollback_internal,
         wall_clock::{FakeTime, WallClock},
         DeployedBinV1, DeployedBinV2, TargetState, TargetStateV1, VersionedTargetState,
+        MAX_VERSIONS_TO_KEEP,
     };
 
     fn assert_contents_matches(file: &PathBuf, contents: &str) {
@@ -356,5 +406,75 @@ mod tests {
         };
         let state = TargetState::load(target);
         assert_eq!(expected_state, state);
+    }
+
+    #[test]
+    fn rollback_works() {
+        let (to_deploy, target) = setup_test_temp_dir();
+        let clock = FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
+
+        let text1: &str = "some contents";
+        create_file(&to_deploy, text1);
+        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy1")).unwrap();
+
+        let clock = clock.advance(Duration::minutes(5));
+        let text2: &str = "contents changed";
+        create_file(&to_deploy, text2);
+        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy2")).unwrap();
+
+        let clock = clock.advance(Duration::minutes(5));
+        let text3: &str = "contents the third";
+        create_file(&to_deploy, text3);
+        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy3")).unwrap();
+
+        let state = TargetState::load(target.clone());
+        assert_eq!(
+            vec![2, 1, 0],
+            state.order_ids().iter().map(|x| *x).collect::<Vec<u128>>()
+        );
+
+        let clock = clock.advance(Duration::minutes(5));
+        rollback_internal(target.clone(), &clock, String::from("rollback")).unwrap();
+
+        let expected_state = TargetState {
+            deployments: hashmap! {
+                0 => DeployedBinV2 {
+                    time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
+                    message: String::from("deploy1")
+                },
+                1 => DeployedBinV2 {
+                    time: DateTime::from_str("2020-01-01T04:55:00Z").unwrap(),
+                    message: String::from("deploy2")
+                },
+                2 => DeployedBinV2 {
+                    time: DateTime::from_str("2020-01-01T05:00:00Z").unwrap(),
+                    message: String::from("deploy3")
+                },
+                3 => DeployedBinV2 {
+                    time: DateTime::from_str("2020-01-01T05:05:00Z").unwrap(),
+                    message: String::from("rollback")
+                },
+            },
+            current: Some(3),
+            target: target.clone(),
+        };
+        let state = TargetState::load(target.clone());
+        assert_eq!(expected_state, state);
+        assert_contents_matches(&state.target, "contents changed")
+    }
+
+    #[test]
+    fn garbage_collection_works() {
+        let (to_deploy, target) = setup_test_temp_dir();
+        let clock = FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
+
+        for _ in 0..20 {
+            let text1: &str = "some contents";
+            create_file(&to_deploy, text1);
+            deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy1")).unwrap();
+        }
+
+        let state = TargetState::load(target.clone());
+        assert!(state.deployments.len() <= MAX_VERSIONS_TO_KEEP);
     }
 }
