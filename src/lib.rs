@@ -16,75 +16,36 @@ use serde::{Deserialize, Serialize};
 
 mod wall_clock;
 
-const STATE_FILE_PREFIX: &str = ".easy-deploy";
+const STATE_FILE_PREFIX: &str = ".easy-deploy_";
 const MAX_VERSIONS_TO_KEEP: usize = 10;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct DeployedBinV2 {
-    time: DateTime<Utc>,
-    message: String,
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct DeployedBinV3 {
+struct DeployedBinV1 {
     time: DateTime<Utc>,
     message: String,
     original_id: u128,
 }
 
-impl DeployedBinV3 {
-    fn from_v2(v2: DeployedBinV2, original_id: u128) -> Self {
-        Self {
-            time: v2.time,
-            message: v2.message,
-            original_id,
-        }
-    }
-}
-
+/// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 /// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct TargetStateV2 {
-    deployments: HashMap<u128, DeployedBinV2>,
+struct TargetStateV1 {
+    deployments: HashMap<u128, DeployedBinV1>,
     current: Option<u128>,
     target: PathBuf,
-}
-
-/// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct TargetStateV3 {
-    deployments: HashMap<u128, DeployedBinV3>,
-    current: Option<u128>,
-    target: PathBuf,
-}
-
-impl TargetStateV3 {
-    fn from_v2(v2: TargetStateV2) -> Self {
-        Self {
-            current: v2.current,
-            target: v2.target,
-            deployments: v2
-                .deployments
-                .into_iter()
-                .map(|(k, v)| (k, DeployedBinV3::from_v2(v, k)))
-                .collect(),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 enum VersionedTargetState {
-    V2(TargetStateV2),
-    V3(TargetStateV3),
+    V1(TargetStateV1),
 }
 
-type TargetState = TargetStateV3;
+type TargetState = TargetStateV1;
 
 impl VersionedTargetState {
     fn to_latest(self) -> TargetState {
         match self {
-            Self::V2(v2) => TargetStateV3::from_v2(v2),
-            Self::V3(v3) => v3,
+            Self::V1(v1) => v1,
         }
     }
 }
@@ -114,7 +75,7 @@ impl TargetState {
     ) -> Self {
         self.deployments.insert(
             new_id,
-            DeployedBinV3 {
+            DeployedBinV1 {
                 time,
                 message,
                 original_id: original_id.unwrap_or(new_id),
@@ -128,7 +89,7 @@ impl TargetState {
     }
 
     fn to_versioned(self) -> VersionedTargetState {
-        VersionedTargetState::V3(self)
+        VersionedTargetState::V1(self)
     }
 
     fn dump(self) -> Result<()> {
@@ -207,7 +168,7 @@ fn add_to_os_string(s: &str, os_string: &OsStr) -> OsString {
 }
 
 fn get_hidden_target(target: &PathBuf, id: u128) -> PathBuf {
-    modify_filename(target, |name| add_to_os_string(&format!("{}_", id), name))
+    modify_filename(target, |name| add_to_os_string(&format!(".{}_", id), name))
 }
 
 fn get_state_path(target: &PathBuf) -> PathBuf {
@@ -300,10 +261,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        deploy_internal, deploy_with_state, get_state_path, rollback_internal,
-        wall_clock::{FakeTime, WallClock},
-        DeployedBinV2, DeployedBinV3, TargetState, TargetStateV2, VersionedTargetState,
-        MAX_VERSIONS_TO_KEEP,
+        deploy_internal, deploy_with_state, rollback_internal, wall_clock::FakeTime, DeployedBinV1,
+        TargetState, MAX_VERSIONS_TO_KEEP,
     };
 
     fn assert_contents_matches(file: &PathBuf, contents: &str) {
@@ -351,8 +310,8 @@ mod tests {
         assert_eq!(
             state.deployments,
             hashmap![
-                0 => DeployedBinV3 { time, message: String::from(message), original_id: 0 },
-                1 => DeployedBinV3 { time, message: String::from(message), original_id: 1 },
+                0 => DeployedBinV1 { time, message: String::from(message), original_id: 0 },
+                1 => DeployedBinV1 { time, message: String::from(message), original_id: 1 },
             ]
         );
     }
@@ -391,69 +350,14 @@ mod tests {
 
         let expected_state = TargetState {
             deployments: hashmap! {
-                0 => DeployedBinV3 {
+                0 => DeployedBinV1 {
                     time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
                     message: String::from("deploy1"),
                     original_id: 0,
                 },
-                1 => DeployedBinV3 {
+                1 => DeployedBinV1 {
                     time: DateTime::from_str("2020-01-01T04:52:00Z").unwrap(),
                     message: String::from("deploy2"),
-                    original_id: 1,
-                },
-            },
-            current: Some(1),
-            target: target.clone(),
-        };
-        let state = TargetState::load(target);
-        assert_eq!(expected_state, state);
-    }
-
-    #[test]
-    fn full_deploy_upgrades_state() {
-        let (to_deploy, target) = setup_test_temp_dir();
-
-        let clock = FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
-
-        let old_state = TargetStateV2 {
-            deployments: hashmap! {
-                0 => DeployedBinV2 {
-                    time: clock.now(),
-                    message: String::from("foo"),
-                }
-            },
-            current: Some(0),
-            target: target.clone(),
-        };
-
-        let state_path = get_state_path(&target);
-        let serialized_state = serde_json::to_string(&VersionedTargetState::V2(old_state)).unwrap();
-        let mut state_file = File::create(state_path).unwrap();
-        state_file.write_all(serialized_state.as_bytes()).unwrap();
-
-        let text: &str = "contents";
-        create_file(&to_deploy, text);
-        let clock = clock.advance(Duration::minutes(5));
-
-        deploy_internal(
-            &to_deploy,
-            target.clone(),
-            &clock,
-            String::from("deploy"),
-            None,
-        )
-        .unwrap();
-
-        let expected_state = TargetState {
-            deployments: hashmap! {
-                0 => DeployedBinV3 {
-                    time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
-                    message: String::from(""),
-                    original_id: 0,
-                },
-                1 => DeployedBinV3 {
-                    time: DateTime::from_str("2020-01-01T04:55:00Z").unwrap(),
-                    message: String::from("deploy"),
                     original_id: 1,
                 },
             },
@@ -515,22 +419,22 @@ mod tests {
 
         let expected_state = TargetState {
             deployments: hashmap! {
-                0 => DeployedBinV3 {
+                0 => DeployedBinV1 {
                     time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
                     message: String::from("deploy1"),
                     original_id: 0,
                 },
-                1 => DeployedBinV3 {
+                1 => DeployedBinV1 {
                     time: DateTime::from_str("2020-01-01T04:55:00Z").unwrap(),
                     message: String::from("deploy2"),
                     original_id: 1,
                 },
-                2 => DeployedBinV3 {
+                2 => DeployedBinV1 {
                     time: DateTime::from_str("2020-01-01T05:00:00Z").unwrap(),
                     message: String::from("deploy3"),
                     original_id: 2,
                 },
-                3 => DeployedBinV3 {
+                3 => DeployedBinV1 {
                     time: DateTime::from_str("2020-01-01T05:05:00Z").unwrap(),
                     message: String::from("rollback"),
                     original_id: 1,
