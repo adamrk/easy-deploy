@@ -23,15 +23,15 @@ const MAX_VERSIONS_TO_KEEP: usize = 10;
 struct DeployedBinV1 {
     time: DateTime<Utc>,
     message: String,
-    original_id: u128,
+    original_id: u32,
 }
 
 /// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 /// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct TargetStateV1 {
-    deployments: HashMap<u128, DeployedBinV1>,
-    current: Option<u128>,
+    deployments: HashMap<u32, DeployedBinV1>,
+    current: Option<u32>,
     target: PathBuf,
 }
 
@@ -59,7 +59,7 @@ impl TargetState {
         }
     }
 
-    fn next_deployment(&self) -> u128 {
+    fn next_deployment(&self) -> u32 {
         match self.deployments.iter().map(|(id, _)| id).max() {
             None => 0,
             Some(max) => max + 1,
@@ -68,10 +68,10 @@ impl TargetState {
 
     fn add_deployment(
         mut self,
-        new_id: u128,
+        new_id: u32,
         time: DateTime<Utc>,
         message: String,
-        original_id: Option<u128>,
+        original_id: Option<u32>,
     ) -> Self {
         self.deployments.insert(
             new_id,
@@ -134,20 +134,20 @@ impl TargetState {
         table.print(output)
     }
 
-    fn order_ids(&self) -> Vec<u128> {
-        let mut ids: Vec<u128> = self.deployments.keys().map(|x| *x).collect();
+    fn order_ids(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.deployments.keys().map(|x| *x).collect();
         ids.sort_by(|x, y| y.cmp(x));
         ids
     }
 
-    fn garbage_collect(&mut self) -> Vec<u128> {
+    fn garbage_collect(&mut self) -> Vec<u32> {
         let ordered_ids = self.order_ids();
-        let to_drop: Vec<u128> = ordered_ids
+        let to_drop: Vec<u32> = ordered_ids
             .iter()
             .skip(MAX_VERSIONS_TO_KEEP)
             .map(|x| *x)
             .collect();
-        let dropping: &Vec<u128> = to_drop.as_ref();
+        let dropping: &Vec<u32> = to_drop.as_ref();
         for id in dropping {
             self.deployments.remove(&id);
         }
@@ -167,7 +167,7 @@ fn add_to_os_string(s: &str, os_string: &OsStr) -> OsString {
     result
 }
 
-fn get_hidden_target(target: &PathBuf, id: u128) -> PathBuf {
+fn get_hidden_target(target: &PathBuf, id: u32) -> PathBuf {
     modify_filename(target, |name| add_to_os_string(&format!(".{}_", id), name))
 }
 
@@ -191,7 +191,7 @@ fn deploy_with_state(
     exe: &PathBuf,
     now: DateTime<Utc>,
     message: String,
-    original_id: Option<u128>,
+    original_id: Option<u32>,
 ) -> Result<TargetState> {
     let next_id = state.next_deployment();
     let hidden_path = get_hidden_target(&state.target, next_id);
@@ -210,7 +210,7 @@ fn deploy_internal(
     target: PathBuf,
     clock: &impl wall_clock::WallClock,
     message: String,
-    original_id: Option<u128>,
+    original_id: Option<u32>,
 ) -> Result<()> {
     let state = TargetState::load(target);
     let now = clock.now();
@@ -222,7 +222,7 @@ fn rollback_internal(
     target: PathBuf,
     clock: &impl wall_clock::WallClock,
     message: String,
-    rollback_id: Option<u128>,
+    rollback_id: Option<u32>,
 ) -> Result<()> {
     let state = TargetState::load(target);
     let rollback_id = rollback_id.unwrap_or_else(|| {
@@ -245,7 +245,7 @@ pub fn list(target: PathBuf) -> Result<()> {
     state.pretty_print(&mut std::io::stdout()).map(|_| ())
 }
 
-pub fn rollback(target: PathBuf, message: String, rollback_id: Option<u128>) -> Result<()> {
+pub fn rollback(target: PathBuf, message: String, rollback_id: Option<u32>) -> Result<()> {
     rollback_internal(target, &wall_clock::SYSTEM_TIME, message, rollback_id)
 }
 
@@ -411,7 +411,7 @@ mod tests {
         let state = TargetState::load(target.clone());
         assert_eq!(
             vec![2, 1, 0],
-            state.order_ids().iter().map(|x| *x).collect::<Vec<u128>>()
+            state.order_ids().iter().map(|x| *x).collect::<Vec<u32>>()
         );
 
         let clock = clock.advance(Duration::minutes(5));

@@ -59,7 +59,7 @@ fn main() {
             String::from(matches.value_of("MESSAGE").unwrap_or("")),
             matches
                 .value_of("VERSION")
-                .map(|version| u128::from_str_radix(version, 10).unwrap()),
+                .map(|version| u32::from_str_radix(version, 10).unwrap()),
         )
     } else {
         Ok(())
