@@ -20,42 +20,24 @@ const STATE_FILE_PREFIX: &str = ".easy-deploy";
 const MAX_VERSIONS_TO_KEEP: usize = 10;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct DeployedBinV1 {
-    time: DateTime<Utc>,
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct DeployedBinV2 {
     time: DateTime<Utc>,
     message: String,
 }
 
-impl DeployedBinV1 {
-    fn to_v2(self) -> DeployedBinV2 {
-        DeployedBinV2 {
-            time: self.time,
-            message: "".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct TargetStateV1 {
-    deployments: HashMap<u128, DeployedBinV1>,
-    current: Option<u128>,
-    target: PathBuf,
+struct DeployedBinV3 {
+    time: DateTime<Utc>,
+    message: String,
+    original_id: u128,
 }
 
-impl TargetStateV1 {
-    fn to_v2(self) -> TargetState {
-        TargetState {
-            deployments: self
-                .deployments
-                .into_iter()
-                .map(|(k, v)| (k, v.to_v2()))
-                .collect(),
-            current: self.current,
-            target: self.target,
+impl DeployedBinV3 {
+    fn from_v2(v2: DeployedBinV2, original_id: u128) -> Self {
+        Self {
+            time: v2.time,
+            message: v2.message,
+            original_id,
         }
     }
 }
@@ -68,19 +50,41 @@ struct TargetStateV2 {
     target: PathBuf,
 }
 
+/// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-enum VersionedTargetState {
-    V1(TargetStateV1),
-    V2(TargetStateV2),
+struct TargetStateV3 {
+    deployments: HashMap<u128, DeployedBinV3>,
+    current: Option<u128>,
+    target: PathBuf,
 }
 
-type TargetState = TargetStateV2;
+impl TargetStateV3 {
+    fn from_v2(v2: TargetStateV2) -> Self {
+        Self {
+            current: v2.current,
+            target: v2.target,
+            deployments: v2
+                .deployments
+                .into_iter()
+                .map(|(k, v)| (k, DeployedBinV3::from_v2(v, k)))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum VersionedTargetState {
+    V2(TargetStateV2),
+    V3(TargetStateV3),
+}
+
+type TargetState = TargetStateV3;
 
 impl VersionedTargetState {
     fn to_latest(self) -> TargetState {
         match self {
-            Self::V1(v1) => v1.to_v2(),
-            Self::V2(v2) => v2,
+            Self::V2(v2) => TargetStateV3::from_v2(v2),
+            Self::V3(v3) => v3,
         }
     }
 }
@@ -101,9 +105,21 @@ impl TargetState {
         }
     }
 
-    fn add_deployment(mut self, new_id: u128, time: DateTime<Utc>, message: String) -> Self {
-        self.deployments
-            .insert(new_id, DeployedBinV2 { time, message });
+    fn add_deployment(
+        mut self,
+        new_id: u128,
+        time: DateTime<Utc>,
+        message: String,
+        original_id: Option<u128>,
+    ) -> Self {
+        self.deployments.insert(
+            new_id,
+            DeployedBinV3 {
+                time,
+                message,
+                original_id: original_id.unwrap_or(new_id),
+            },
+        );
         TargetState {
             deployments: self.deployments,
             current: Some(new_id),
@@ -112,7 +128,7 @@ impl TargetState {
     }
 
     fn to_versioned(self) -> VersionedTargetState {
-        VersionedTargetState::V2(self)
+        VersionedTargetState::V3(self)
     }
 
     fn dump(self) -> Result<()> {
@@ -139,14 +155,17 @@ impl TargetState {
     fn pretty_print(&self, output: &mut impl Write) -> Result<usize> {
         let mut table = Table::new();
 
-        table.add_row(row!["id", "timestamp", "current"]);
-        self.deployments.iter().for_each(|(id, d)| {
+        table.add_row(row!["id", "message", "timestamp", "current"]);
+        let ordered_ids = self.order_ids();
+        ordered_ids.iter().for_each(|id| {
+            let deploy = self.deployments.get(id).unwrap();
             let current_symbol = self
                 .current
                 .map_or(" ", |current| if current == *id { "*" } else { " " });
-            let time: DateTime<Local> = DateTime::from(d.time);
+            let time: DateTime<Local> = DateTime::from(deploy.time);
             table.add_row(row![
-                id.to_string(),
+                deploy.original_id.to_string(),
+                deploy.message,
                 time.format("%Y-%d-%m %H:%M:%S"),
                 current_symbol
             ]);
@@ -211,6 +230,7 @@ fn deploy_with_state(
     exe: &PathBuf,
     now: DateTime<Utc>,
     message: String,
+    original_id: Option<u128>,
 ) -> Result<TargetState> {
     let next_id = state.next_deployment();
     let hidden_path = get_hidden_target(&state.target, next_id);
@@ -220,7 +240,7 @@ fn deploy_with_state(
         let _ = remove_file(&state.target)?;
     }
     let _ = symlink(hidden_path, &state.target)?;
-    let state = state.add_deployment(next_id, now, message);
+    let state = state.add_deployment(next_id, now, message, original_id);
     delete_garbage(state)
 }
 
@@ -229,15 +249,34 @@ fn deploy_internal(
     target: PathBuf,
     clock: &impl wall_clock::WallClock,
     message: String,
+    original_id: Option<u128>,
 ) -> Result<()> {
     let state = TargetState::load(target);
     let now = clock.now();
-    let state = deploy_with_state(state, exe, now, message)?;
+    let state = deploy_with_state(state, exe, now, message, original_id)?;
     state.dump()
 }
 
+fn rollback_internal(
+    target: PathBuf,
+    clock: &impl wall_clock::WallClock,
+    message: String,
+    rollback_id: Option<u128>,
+) -> Result<()> {
+    let state = TargetState::load(target);
+    let rollback_id = rollback_id.unwrap_or_else(|| {
+        let ordered_ids = state.order_ids();
+        match ordered_ids.get(1) {
+            None => panic!("no previous deploy"),
+            Some(id) => *id,
+        }
+    });
+    let to_deploy = get_hidden_target(&state.target, rollback_id);
+    deploy_internal(&to_deploy, state.target, clock, message, Some(rollback_id))
+}
+
 pub fn deploy(exe: &PathBuf, target: PathBuf, message: String) -> Result<()> {
-    deploy_internal(exe, target, &wall_clock::SYSTEM_TIME, message)
+    deploy_internal(exe, target, &wall_clock::SYSTEM_TIME, message, None)
 }
 
 pub fn list(target: PathBuf) -> Result<()> {
@@ -245,19 +284,8 @@ pub fn list(target: PathBuf) -> Result<()> {
     state.pretty_print(&mut std::io::stdout()).map(|_| ())
 }
 
-pub fn rollback_internal(
-    target: PathBuf,
-    clock: &impl wall_clock::WallClock,
-    message: String,
-) -> Result<()> {
-    let state = TargetState::load(target);
-    let ordered_ids = state.order_ids();
-    let prev_id = match ordered_ids.get(1) {
-        None => panic!("no previous deploy"),
-        Some(id) => id,
-    };
-    let to_deploy = get_hidden_target(&state.target, *prev_id);
-    deploy_internal(&to_deploy, state.target, clock, message)
+pub fn rollback(target: PathBuf, message: String, rollback_id: Option<u128>) -> Result<()> {
+    rollback_internal(target, &wall_clock::SYSTEM_TIME, message, rollback_id)
 }
 
 #[cfg(test)]
@@ -274,7 +302,7 @@ mod tests {
     use super::{
         deploy_internal, deploy_with_state, get_state_path, rollback_internal,
         wall_clock::{FakeTime, WallClock},
-        DeployedBinV1, DeployedBinV2, TargetState, TargetStateV1, VersionedTargetState,
+        DeployedBinV2, DeployedBinV3, TargetState, TargetStateV2, VersionedTargetState,
         MAX_VERSIONS_TO_KEEP,
     };
 
@@ -309,20 +337,22 @@ mod tests {
         let text1: &str = "some contents";
         create_file(&to_deploy, text1);
 
-        let state = deploy_with_state(state, &to_deploy, time, String::from(message)).unwrap();
+        let state =
+            deploy_with_state(state, &to_deploy, time, String::from(message), None).unwrap();
         assert_contents_matches(&state.target, text1);
 
         let text2: &str = "contents changed";
         create_file(&to_deploy, text2);
 
-        let state = deploy_with_state(state, &to_deploy, time, String::from(message)).unwrap();
+        let state =
+            deploy_with_state(state, &to_deploy, time, String::from(message), None).unwrap();
         assert_contents_matches(&state.target, text2);
 
         assert_eq!(
             state.deployments,
             hashmap![
-                0 => DeployedBinV2 { time, message: String::from(message) },
-                1 => DeployedBinV2 { time, message: String::from(message) },
+                0 => DeployedBinV3 { time, message: String::from(message), original_id: 0 },
+                1 => DeployedBinV3 { time, message: String::from(message), original_id: 1 },
             ]
         );
     }
@@ -335,25 +365,41 @@ mod tests {
         let text1: &str = "some contents";
         create_file(&to_deploy, text1);
 
-        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy1")).unwrap();
+        deploy_internal(
+            &to_deploy,
+            target.clone(),
+            &clock,
+            String::from("deploy1"),
+            None,
+        )
+        .unwrap();
         assert_contents_matches(&target, text1);
 
         let clock = clock.advance(Duration::minutes(2));
         let text2: &str = "contents changed";
         create_file(&to_deploy, text2);
 
-        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy2")).unwrap();
+        deploy_internal(
+            &to_deploy,
+            target.clone(),
+            &clock,
+            String::from("deploy2"),
+            None,
+        )
+        .unwrap();
         assert_contents_matches(&target, text2);
 
         let expected_state = TargetState {
             deployments: hashmap! {
-                0 => DeployedBinV2 {
+                0 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
-                    message: String::from("deploy1")
+                    message: String::from("deploy1"),
+                    original_id: 0,
                 },
-                1 => DeployedBinV2 {
+                1 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T04:52:00Z").unwrap(),
-                    message: String::from("deploy2")
+                    message: String::from("deploy2"),
+                    original_id: 1,
                 },
             },
             current: Some(1),
@@ -369,10 +415,11 @@ mod tests {
 
         let clock = FakeTime::new(DateTime::from_str("2020-01-01T04:50:00-00:00").unwrap());
 
-        let old_state = TargetStateV1 {
+        let old_state = TargetStateV2 {
             deployments: hashmap! {
-                0 => DeployedBinV1 {
+                0 => DeployedBinV2 {
                     time: clock.now(),
+                    message: String::from("foo"),
                 }
             },
             current: Some(0),
@@ -380,7 +427,7 @@ mod tests {
         };
 
         let state_path = get_state_path(&target);
-        let serialized_state = serde_json::to_string(&VersionedTargetState::V1(old_state)).unwrap();
+        let serialized_state = serde_json::to_string(&VersionedTargetState::V2(old_state)).unwrap();
         let mut state_file = File::create(state_path).unwrap();
         state_file.write_all(serialized_state.as_bytes()).unwrap();
 
@@ -388,17 +435,26 @@ mod tests {
         create_file(&to_deploy, text);
         let clock = clock.advance(Duration::minutes(5));
 
-        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy")).unwrap();
+        deploy_internal(
+            &to_deploy,
+            target.clone(),
+            &clock,
+            String::from("deploy"),
+            None,
+        )
+        .unwrap();
 
         let expected_state = TargetState {
             deployments: hashmap! {
-                0 => DeployedBinV2 {
+                0 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
-                    message: String::from("")
+                    message: String::from(""),
+                    original_id: 0,
                 },
-                1 => DeployedBinV2 {
+                1 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T04:55:00Z").unwrap(),
-                    message: String::from("deploy")
+                    message: String::from("deploy"),
+                    original_id: 1,
                 },
             },
             current: Some(1),
@@ -415,17 +471,38 @@ mod tests {
 
         let text1: &str = "some contents";
         create_file(&to_deploy, text1);
-        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy1")).unwrap();
+        deploy_internal(
+            &to_deploy,
+            target.clone(),
+            &clock,
+            String::from("deploy1"),
+            None,
+        )
+        .unwrap();
 
         let clock = clock.advance(Duration::minutes(5));
         let text2: &str = "contents changed";
         create_file(&to_deploy, text2);
-        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy2")).unwrap();
+        deploy_internal(
+            &to_deploy,
+            target.clone(),
+            &clock,
+            String::from("deploy2"),
+            None,
+        )
+        .unwrap();
 
         let clock = clock.advance(Duration::minutes(5));
         let text3: &str = "contents the third";
         create_file(&to_deploy, text3);
-        deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy3")).unwrap();
+        deploy_internal(
+            &to_deploy,
+            target.clone(),
+            &clock,
+            String::from("deploy3"),
+            None,
+        )
+        .unwrap();
 
         let state = TargetState::load(target.clone());
         assert_eq!(
@@ -434,25 +511,29 @@ mod tests {
         );
 
         let clock = clock.advance(Duration::minutes(5));
-        rollback_internal(target.clone(), &clock, String::from("rollback")).unwrap();
+        rollback_internal(target.clone(), &clock, String::from("rollback"), None).unwrap();
 
         let expected_state = TargetState {
             deployments: hashmap! {
-                0 => DeployedBinV2 {
+                0 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
-                    message: String::from("deploy1")
+                    message: String::from("deploy1"),
+                    original_id: 0,
                 },
-                1 => DeployedBinV2 {
+                1 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T04:55:00Z").unwrap(),
-                    message: String::from("deploy2")
+                    message: String::from("deploy2"),
+                    original_id: 1,
                 },
-                2 => DeployedBinV2 {
+                2 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T05:00:00Z").unwrap(),
-                    message: String::from("deploy3")
+                    message: String::from("deploy3"),
+                    original_id: 2,
                 },
-                3 => DeployedBinV2 {
+                3 => DeployedBinV3 {
                     time: DateTime::from_str("2020-01-01T05:05:00Z").unwrap(),
-                    message: String::from("rollback")
+                    message: String::from("rollback"),
+                    original_id: 1,
                 },
             },
             current: Some(3),
@@ -471,7 +552,14 @@ mod tests {
         for _ in 0..20 {
             let text1: &str = "some contents";
             create_file(&to_deploy, text1);
-            deploy_internal(&to_deploy, target.clone(), &clock, String::from("deploy1")).unwrap();
+            deploy_internal(
+                &to_deploy,
+                target.clone(),
+                &clock,
+                String::from("deploy1"),
+                None,
+            )
+            .unwrap();
         }
 
         let state = TargetState::load(target.clone());

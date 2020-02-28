@@ -32,6 +32,18 @@ fn main() {
                 .about("list deployments")
                 .arg(target_arg.clone().index(1)),
         )
+        .subcommand(
+            SubCommand::with_name("rollback")
+                .about("rollback to an earlier version")
+                .arg(target_arg.clone().index(1))
+                .arg(message_arg.clone().index(2))
+                .arg(
+                    Arg::with_name("VERSION")
+                        .help("Version to rollback to")
+                        .required(false)
+                        .index(3),
+                ),
+        )
         .get_matches();
     let result = if let Some(matches) = matches.subcommand_matches("deploy") {
         easy_deploy::deploy(
@@ -41,6 +53,14 @@ fn main() {
         )
     } else if let Some(matches) = matches.subcommand_matches("list") {
         easy_deploy::list(PathBuf::from(matches.value_of("TARGET").unwrap()))
+    } else if let Some(matches) = matches.subcommand_matches("rollback") {
+        easy_deploy::rollback(
+            PathBuf::from(matches.value_of("TARGET").unwrap()),
+            String::from(matches.value_of("MESSAGE").unwrap_or("")),
+            matches
+                .value_of("VERSION")
+                .map(|version| u128::from_str_radix(version, 10).unwrap()),
+        )
     } else {
         Ok(())
     };
