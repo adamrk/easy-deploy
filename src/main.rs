@@ -33,7 +33,7 @@ enum Command {
             long,
             name = "VERSION",
             help = "version to rollback to (defaults to previous version)"
- :way       )]
+        )]
         version: Option<u32>,
     },
     #[structopt(name = "list", about = "List deployed versions")]

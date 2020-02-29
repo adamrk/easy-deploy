@@ -20,16 +20,17 @@ const STATE_FILE_PREFIX: &str = ".easy-deploy_";
 const MAX_VERSIONS_TO_KEEP: usize = 10;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct DeployedBinV1 {
+struct DeploymentV1 {
     time: DateTime<Utc>,
     message: String,
     original_id: u32,
 }
 
+/// The state of a target consists of a list of deployed binaries, the current version, and the target path.
 /// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct TargetStateV1 {
-    deployments: HashMap<u32, DeployedBinV1>,
+    deployments: HashMap<u32, DeploymentV1>,
     current: Option<u32>,
     target: PathBuf,
 }
@@ -74,7 +75,7 @@ impl TargetState {
     ) -> Self {
         self.deployments.insert(
             new_id,
-            DeployedBinV1 {
+            DeploymentV1 {
                 time,
                 message,
                 original_id: original_id.unwrap_or(new_id),
@@ -260,7 +261,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        deploy_internal, deploy_with_state, rollback_internal, wall_clock::FakeTime, DeployedBinV1,
+        deploy_internal, deploy_with_state, rollback_internal, wall_clock::FakeTime, DeploymentV1,
         TargetState, MAX_VERSIONS_TO_KEEP,
     };
 
@@ -309,8 +310,8 @@ mod tests {
         assert_eq!(
             state.deployments,
             hashmap![
-                0 => DeployedBinV1 { time, message: String::from(message), original_id: 0 },
-                1 => DeployedBinV1 { time, message: String::from(message), original_id: 1 },
+                0 => DeploymentV1 { time, message: String::from(message), original_id: 0 },
+                1 => DeploymentV1 { time, message: String::from(message), original_id: 1 },
             ]
         );
     }
@@ -349,12 +350,12 @@ mod tests {
 
         let expected_state = TargetState {
             deployments: hashmap! {
-                0 => DeployedBinV1 {
+                0 => DeploymentV1 {
                     time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
                     message: String::from("deploy1"),
                     original_id: 0,
                 },
-                1 => DeployedBinV1 {
+                1 => DeploymentV1 {
                     time: DateTime::from_str("2020-01-01T04:52:00Z").unwrap(),
                     message: String::from("deploy2"),
                     original_id: 1,
@@ -418,22 +419,22 @@ mod tests {
 
         let expected_state = TargetState {
             deployments: hashmap! {
-                0 => DeployedBinV1 {
+                0 => DeploymentV1 {
                     time: DateTime::from_str("2020-01-01T04:50:00Z").unwrap(),
                     message: String::from("deploy1"),
                     original_id: 0,
                 },
-                1 => DeployedBinV1 {
+                1 => DeploymentV1 {
                     time: DateTime::from_str("2020-01-01T04:55:00Z").unwrap(),
                     message: String::from("deploy2"),
                     original_id: 1,
                 },
-                2 => DeployedBinV1 {
+                2 => DeploymentV1 {
                     time: DateTime::from_str("2020-01-01T05:00:00Z").unwrap(),
                     message: String::from("deploy3"),
                     original_id: 2,
                 },
-                3 => DeployedBinV1 {
+                3 => DeploymentV1 {
                     time: DateTime::from_str("2020-01-01T05:05:00Z").unwrap(),
                     message: String::from("rollback"),
                     original_id: 1,
