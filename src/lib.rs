@@ -27,7 +27,6 @@ struct DeployedBinV1 {
 }
 
 /// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
-/// Invariant: All keys in the map are <= current and current is a key in the map (unless it is None).
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct TargetStateV1 {
     deployments: HashMap<u32, DeployedBinV1>,

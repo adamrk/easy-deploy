@@ -1,71 +1,61 @@
 use std::path::PathBuf;
 
-use clap::{App, Arg, SubCommand};
+use structopt::StructOpt;
 
 use easy_deploy;
 
+#[derive(StructOpt)]
+#[structopt(
+    name = "easy-deploy",
+    about = "Deploy the easy way to a shared location"
+)]
+enum Command {
+    #[structopt(name = "deploy", about = "Deploy a file")]
+    Deploy {
+        #[structopt(name = "FILE", help = "File to deploy", required = true)]
+        source: PathBuf,
+
+        #[structopt(name = "TARGET", help = "Location to deploy to", required = true)]
+        target: PathBuf,
+
+        #[structopt(long, name = "MESSAGE", help = "deploy message", required = false)]
+        message: String,
+    },
+    #[structopt(name = "rollback", about = "Rollback deployment")]
+    Rollback {
+        #[structopt(name = "TARGET", help = "Target to rollback", required = true)]
+        target: PathBuf,
+
+        #[structopt(long, name = "MESSAGE", help = "rollback message", required = false)]
+        message: String,
+
+        #[structopt(
+            long,
+            name = "VERSION",
+            help = "version to rollback to (defaults to previous version)"
+ :way       )]
+        version: Option<u32>,
+    },
+    #[structopt(name = "list", about = "List deployed versions")]
+    List {
+        #[structopt(name = "TARGET", help = "Deployed target to show", required = true)]
+        target: PathBuf,
+    },
+}
+
 fn main() {
-    let target_arg = Arg::with_name("TARGET")
-        .help("target deploy location")
-        .required(true);
-
-    let message_arg = Arg::with_name("MESSAGE")
-        .help("deploy comment")
-        .required(false);
-
-    let matches = App::new("easy-deploy")
-        .about("simple deploy")
-        .subcommand(
-            SubCommand::with_name("deploy")
-                .about("deploys file")
-                .arg(
-                    Arg::with_name("SOURCE")
-                        .help("file to deploy")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(target_arg.clone().index(2))
-                .arg(message_arg.clone().index(3)),
-        )
-        .subcommand(
-            SubCommand::with_name("list")
-                .about("list deployments")
-                .arg(target_arg.clone().index(1)),
-        )
-        .subcommand(
-            SubCommand::with_name("rollback")
-                .about("rollback to an earlier version")
-                .arg(target_arg.clone().index(1))
-                .arg(message_arg.clone().index(2))
-                .arg(
-                    Arg::with_name("VERSION")
-                        .help("Version to rollback to")
-                        .required(false)
-                        .index(3),
-                ),
-        )
-        .get_matches();
-    let result = if let Some(matches) = matches.subcommand_matches("deploy") {
-        easy_deploy::deploy(
-            &PathBuf::from(matches.value_of("SOURCE").unwrap()),
-            PathBuf::from(matches.value_of("TARGET").unwrap()),
-            String::from(matches.value_of("MESSAGE").unwrap_or("")),
-        )
-    } else if let Some(matches) = matches.subcommand_matches("list") {
-        easy_deploy::list(PathBuf::from(matches.value_of("TARGET").unwrap()))
-    } else if let Some(matches) = matches.subcommand_matches("rollback") {
-        easy_deploy::rollback(
-            PathBuf::from(matches.value_of("TARGET").unwrap()),
-            String::from(matches.value_of("MESSAGE").unwrap_or("")),
-            matches
-                .value_of("VERSION")
-                .map(|version| u32::from_str_radix(version, 10).unwrap()),
-        )
-    } else {
-        Ok(())
-    };
-    match result {
-        Err(error) => println!("Error {}", error),
-        Ok(()) => (),
+    let command = Command::from_args();
+    match command {
+        Command::Deploy {
+            source,
+            target,
+            message,
+        } => easy_deploy::deploy(&source, target, message).unwrap(),
+        Command::Rollback {
+            target,
+            message,
+            version,
+        } => easy_deploy::rollback(target, message, version).unwrap(),
+        Command::List { target } => easy_deploy::list(target).unwrap(),
     }
 }
