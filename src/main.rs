@@ -32,7 +32,7 @@ enum Command {
         #[structopt(
             long,
             name = "VERSION",
-            help = "version to rollback to (defaults to previous version)"
+            help = "version id to rollback to (defaults to previous version)"
         )]
         version: Option<u32>,
     },
